@@ -240,10 +240,10 @@ const gameManager = {
   endRound: async (io, roomId, firstTime) => {
     clearTimeout(timeout);
     let room = { ...rooms.get(roomId) };
-    if (room.roundDetails.length === 3) {
-      gameManager.endGame(io, roomId);
-      return;
-    }
+    // if (room.roundDetails.length === 3) {
+    //   gameManager.endGame(io, roomId);
+    //   return;
+    // }
     let nextTurn = nextTurnDecider(room);
     room.roundDetails.push({
       roundNum: room.roundDetails.length + 1,
