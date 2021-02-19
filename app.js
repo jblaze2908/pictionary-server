@@ -1,14 +1,29 @@
 const express = require("express");
 const app = express();
-const server = require("http").createServer(app);
+const fs = require("fs");
+const config = require("./config");
 const PORT = process.env.PORT || 4000;
 const bodyParser = require("body-parser");
 const cors = require("cors");
 const gameManager = require("./gameManager");
-app.use(bodyParser.json({ limit: "50mb" }));
-app.use(cors());
 const players = require("./database").players;
 const rooms = require("./database").rooms;
+let server;
+if (config.devMode) {
+  server = require("http").createServer(app);
+} else {
+  const serverOptions = {
+    key: fs.readFileSync(
+      "/etc/letsencrypt/live/" + config.domain + "/privkey.pem"
+    ),
+    cert: fs.readFileSync(
+      "/etc/letsencrypt/live/" + config.domain + "/cert.pem"
+    ),
+  };
+  server = require("https").createServer(serverOptions, app);
+}
+app.use(bodyParser.json({ limit: "50mb" }));
+app.use(cors());
 const options = {
   cors: {
     origin: "*",
