@@ -2,20 +2,45 @@ const players = require("./database").players;
 const rooms = require("./database").rooms;
 const { v4: uuidv4 } = require("uuid");
 const helperFunctions = {
-  alreadyInRoom: (socket, callback) => {
+  alreadyInRoom: async (io, socket) => {
     if (socket.rooms.size > 1) {
       let roomId = Array.from(socket.rooms)[1];
-      callback({
-        status: 220, //Already in a room
-        roomId: roomId,
-      });
-      return true;
-    } else return false;
+      socket.leave(roomId);
+      let room = { ...rooms.get(roomId) };
+      let players = [...room.players];
+      let index = helperFunctions.findWithAttr(
+        players,
+        "sessionId",
+        socket.sessionId
+      );
+      players.splice(index, 1);
+      room.players = [...players];
+      let msg = {
+        text: socket.username + " left.",
+        sender: undefined,
+      };
+      let chats = [...room.chats];
+      chats.push(msg);
+      room.chats = chats;
+      rooms.set(roomId, room);
+      let dataToSend = { ...room };
+      dataToSend = await helperFunctions.populatePlayers(dataToSend);
+      let unredactedData = { ...dataToSend };
+      io.in(roomId).emit("updateRound", unredactedData);
+      if (
+        room.roundDetails.length !== 0 &&
+        room.roundDetails[room.roundDetails.length - 1].chosenBy ===
+          socket.sessionId &&
+        room.players.length !== 1
+      )
+        return roomId;
+      else return null;
+    }
+    return null;
   },
   roomNotFound: (io, roomId, callback) => {
     let socket_rooms = io.sockets.adapter.rooms;
     if (!rooms.get(roomId) || !socket_rooms.get(roomId)) {
-      console.log(roomId + " not found");
       callback({
         status: 404, //Room not found
       });
@@ -35,7 +60,7 @@ const helperFunctions = {
       let playerDetails = { ...players.get(sessionId) };
       playerDetails.currentRoom = roomId;
       players.set(sessionId, playerDetails);
-      resolve;
+      resolve(null);
     });
   },
   populatePlayerDetails: (sessionId) => {
@@ -52,13 +77,14 @@ const helperFunctions = {
       let playerData = [];
       for (let player of dataToSend.players) {
         let playerDetails = players.get(player.sessionId);
-        playerData.push({
-          username: playerDetails.username,
-          socket_id: playerDetails.socket_id,
-          sessionId: playerDetails.sessionId,
-          inGame: playerDetails.inGame,
-          score: player.score,
-        });
+        if (playerDetails)
+          playerData.push({
+            username: playerDetails.username,
+            socket_id: playerDetails.socket_id,
+            sessionId: playerDetails.sessionId,
+            inGame: playerDetails.inGame,
+            score: player.score,
+          });
       }
       dataToSend.players = playerData;
       resolve(dataToSend);
@@ -72,20 +98,20 @@ const helperFunctions = {
     }
     return false;
   },
-  redactChosenWord: (dataToSend) => {
+  redactChosenWord: (dataToSend, sessionId) => {
     return new Promise(async (resolve, reject) => {
       if (dataToSend.roundDetails.length > 0) {
         let roundDetails = [...dataToSend.roundDetails];
         let currentRoundNumber = roundDetails.length - 1;
         let currentRound = { ...roundDetails[currentRoundNumber] };
-        if (currentRound.chosenWord) {
+        if (currentRound.chosenWord && currentRound.chosenBy !== sessionId) {
           currentRound.chosenWord = helperFunctions.redact(
             currentRound.chosenWord
           );
-          roundDetails[currentRoundNumber] = currentRound;
-          dataToSend.roundDetails = roundDetails;
-          resolve(dataToSend);
         }
+        roundDetails[currentRoundNumber] = currentRound;
+        dataToSend.roundDetails = roundDetails;
+        resolve(dataToSend);
       } else resolve(dataToSend);
     });
   },

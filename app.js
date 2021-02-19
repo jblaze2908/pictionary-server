@@ -18,7 +18,7 @@ const options = {
 app.set("port", PORT);
 app.get("/", async (req, res) => {
   return res.status(200).json({
-    players: Object.fromEntries(players),
+    // players: Object.fromEntries(players),
     rooms: Object.fromEntries(rooms),
   });
 });
@@ -35,19 +35,23 @@ io.on("connection", async (socket) => {
   });
   //User Leave
   socket.on("disconnecting", () => {
-    gameManager.setPlayerAsAfk(socket);
+    gameManager.setPlayerAsAfk(io, socket);
   });
   //Create Room
   socket.on("createRoom", (callback) => {
-    gameManager.createRoom(socket, callback);
+    gameManager.createRoom(io, socket, callback);
   });
   //Join Room
   socket.on("joinRoom", (roomId, callback) => {
     gameManager.joinGame(io, socket, roomId, callback);
   });
+  //Leave Room
+  socket.on("leaveRoom", (callback) => {
+    gameManager.leaveRoom(io, socket, callback);
+  });
   //Fetch Room Details
-  socket.on("getRoomDetails", (callback) => {
-    gameManager.fetchRoomDetails(socket, callback);
+  socket.on("getRoomDetails", (roomId, callback) => {
+    gameManager.fetchRoomDetails(roomId, socket, callback);
   });
   //Player chooses word
   socket.on("chooseWord", (chosenWord, callback) => {
