@@ -2,19 +2,29 @@ const players = require("./database").players;
 const rooms = require("./database").rooms;
 const { v4: uuidv4 } = require("uuid");
 const helperFunctions = {
-  alreadyInRoom: async (io, socket) => {
+  alreadyInRoom: (socket) => {
     if (socket.rooms.size > 1) {
       let roomId = Array.from(socket.rooms)[1];
-      socket.leave(roomId);
+      return roomId;
+    } else return null;
+  },
+  whoseTurnIsIt: (roomId) => {
+    let room = rooms.get(roomId);
+    if (room.roundDetails.length !== 0) {
+      return room.roundDetails[room.roundDetails.length - 1].chosenBy;
+    } else return null;
+  },
+  removeFromRoom: (socket, roomId) => {
+    return new Promise(async (resolve, reject) => {
       let room = { ...rooms.get(roomId) };
-      let players = [...room.players];
+      let roomPlayers = [...room.players];
       let index = helperFunctions.findWithAttr(
-        players,
+        roomPlayers,
         "sessionId",
         socket.sessionId
       );
-      players.splice(index, 1);
-      room.players = [...players];
+      roomPlayers.splice(index, 1);
+      room.players = roomPlayers;
       let msg = {
         text: socket.username + " left.",
         sender: undefined,
@@ -23,21 +33,35 @@ const helperFunctions = {
       chats.push(msg);
       room.chats = chats;
       rooms.set(roomId, room);
-      let dataToSend = { ...room };
-      dataToSend = await helperFunctions.populatePlayers(dataToSend);
-      let unredactedData = { ...dataToSend };
-      io.in(roomId).emit("updateRound", unredactedData);
-      if (
-        room.roundDetails.length !== 0 &&
-        room.roundDetails[room.roundDetails.length - 1].chosenBy ===
-          socket.sessionId &&
-        room.players.length !== 1
-      )
-        return roomId;
-      else return null;
-    }
-    return null;
+      let player = players.get(socket.sessionId);
+      player.currentRoom = "";
+      players.set(socket.sessionId, player);
+      socket.leave(roomId);
+      resolve(null);
+    });
   },
+  setGameAsPaused: (roomId) => {
+    return new Promise(async (resolve, reject) => {
+      let room = { ...rooms.get(roomId) };
+      room.gameState = "PAUSED";
+      rooms.set(roomId, room);
+      resolve(null);
+    });
+  },
+  notifyPlayersInRoom: async (io, roomId, wordChosenBy) => {
+    let room = { ...rooms.get(roomId) };
+    room = await helperFunctions.populatePlayers(room);
+    let unredactedData = { ...room };
+    let redactedData = await helperFunctions.redactChosenWord(room);
+    room.players.forEach((player) => {
+      socketId = helperFunctions.populatePlayerDetails(player.sessionId)
+        .socket_id;
+      if (player.sessionId === wordChosenBy)
+        io.to(socketId).emit("updateRound", unredactedData);
+      else io.to(socketId).emit("updateRound", redactedData);
+    });
+  },
+
   roomNotFound: (io, roomId, callback) => {
     let socket_rooms = io.sockets.adapter.rooms;
     if (!rooms.get(roomId) || !socket_rooms.get(roomId)) {
@@ -55,7 +79,7 @@ const helperFunctions = {
     }
     return -1;
   },
-  joinGame: (sessionId, roomId) => {
+  joinRoom: (sessionId, roomId) => {
     return new Promise(async (resolve, reject) => {
       let playerDetails = { ...players.get(sessionId) };
       playerDetails.currentRoom = roomId;
@@ -104,6 +128,12 @@ const helperFunctions = {
         let roundDetails = [...dataToSend.roundDetails];
         let currentRoundNumber = roundDetails.length - 1;
         let currentRound = { ...roundDetails[currentRoundNumber] };
+        if (
+          currentRound.wordsSent.length !== 0 &&
+          currentRound.chosenBy !== sessionId
+        ) {
+          currentRound.wordsSent = [];
+        }
         if (currentRound.chosenWord && currentRound.chosenBy !== sessionId) {
           currentRound.chosenWord = helperFunctions.redact(
             currentRound.chosenWord
@@ -125,7 +155,7 @@ const helperFunctions = {
     let currentRound = room.roundDetails[currentRoundNumber];
     if (!currentRound) return false;
     let chosenWord = currentRound.chosenWord;
-    return chosenWord.toLowerCase() === text.toLowerCase();
+    return text.toLowerCase() === chosenWord.toLowerCase();
   },
   scoreCalculator: (time) => {
     if (time > 40) return 50;
@@ -137,50 +167,59 @@ const helperFunctions = {
     if (time > 0) return 10;
   },
   updateScore: (room, sessionId, score) => {
-    let players = [...room.players];
-    let index = helperFunctions.findWithAttr(players, "sessionId", sessionId);
-    let currentRoundNumber = room.roundDetails.length - 1;
-    let currentRound = { ...room.roundDetails[currentRoundNumber] };
-    let guessedBy = [...currentRound.guessedBy] || [];
-    guessedBy.push(sessionId);
-    currentRound.guessedBy = guessedBy;
-    let updatedRound = currentRound;
-    players[index].score += score;
-    room.roundDetails[currentRoundNumber] = updatedRound;
-    room.players = players;
-    return room;
+    return new Promise(async (resolve, reject) => {
+      let players = [...room.players];
+      let index = helperFunctions.findWithAttr(players, "sessionId", sessionId);
+      let currentRoundNumber = room.roundDetails.length - 1;
+      let currentRound = { ...room.roundDetails[currentRoundNumber] };
+      let guessedBy = [...currentRound.guessedBy] || [];
+      guessedBy.push(sessionId);
+      currentRound.guessedBy = guessedBy;
+      let updatedRound = currentRound;
+      players[index].score += score;
+      room.roundDetails[currentRoundNumber] = updatedRound;
+      room.players = players;
+      resolve(room);
+    });
   },
   nextTurnDecider: (room) => {
-    let roomPlayers = [...room.players];
-    let nextPlayer;
-    if (room.roundDetails.length === 0) {
-      let index = 0;
-      while (!nextPlayer) {
-        nextPlayer = roomPlayers[index].sessionId;
-        if (!players.get(nextPlayer).inGame) {
-          index++;
-          nextPlayer = undefined;
+    return new Promise(async (resolve, reject) => {
+      let roomPlayers = [...room.players];
+      let roundDetails = [...room.roundDetails];
+      let nextPlayer;
+      let prevPlayer = helperFunctions.whoseTurnIsIt(room.roomId);
+      if (roundDetails.length === 0) {
+        nextPlayer = roomPlayers[0].sessionId;
+      } else {
+        let index = helperFunctions.findWithAttr(
+          roomPlayers,
+          "sessionId",
+          prevPlayer
+        );
+        if (index === -1) {
+          let reversedRoundDetails = [...roundDetails].reverse();
+          for (const round of reversedRoundDetails) {
+            index = helperFunctions.findWithAttr(
+              roomPlayers,
+              "sessionId",
+              round.chosenBy
+            );
+            if (index !== -1) break;
+          }
+          if (index === -1) nextPlayer = roomPlayers[0].sessionId;
+          else {
+            if (index === roomPlayers.length - 1)
+              nextPlayer = roomPlayers[0].sessionId;
+            else nextPlayer = roomPlayers[index + 1].sessionId;
+          }
+        } else {
+          if (index === roomPlayers.length - 1)
+            nextPlayer = roomPlayers[0].sessionId;
+          else nextPlayer = roomPlayers[index + 1].sessionId;
         }
       }
-    } else {
-      let currentTurn =
-        room.roundDetails[room.roundDetails.length - 1].chosenBy;
-      let index = helperFunctions.findWithAttr(
-        roomPlayers,
-        "sessionId",
-        currentTurn
-      );
-      while (!nextPlayer) {
-        if (index === roomPlayers.length - 1)
-          nextPlayer = roomPlayers[0].sessionId;
-        else nextPlayer = roomPlayers[index + 1].sessionId;
-        if (!players.get(nextPlayer).inGame) {
-          index++;
-          nextPlayer = undefined;
-        }
-      }
-    }
-    return nextPlayer;
+      resolve(nextPlayer);
+    });
   },
   generateRoomId: () => {
     return "RoomNo" + (rooms.size + 1);

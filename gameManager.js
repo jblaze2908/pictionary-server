@@ -11,11 +11,15 @@ const {
   wordAlreadyChosen,
   populatePlayers,
   populatePlayerDetails,
+  setGameAsPaused,
   correctWordValidator,
   updateScore,
   nextTurnDecider,
-  joinGame,
+  joinRoom,
   findWithAttr,
+  whoseTurnIsIt,
+  removeFromRoom,
+  notifyPlayersInRoom,
 } = require("./helperFunctions");
 let timeout;
 const gameManager = {
@@ -50,13 +54,32 @@ const gameManager = {
       username: username,
     });
     socket.username = username;
+
     callback({ status: 200 });
   },
-  createRoom: async (io, socket, callback) => {
-    let roomID = await alreadyInRoom(io, socket, callback);
+  removeFromExistingRoom: async (io, socket, roomId) => {
+    return new Promise(async (resolve, reject) => {
+      await removeFromRoom(socket, roomId);
+      let numPlayersLeft = rooms.get(roomId).players.length;
+      if (numPlayersLeft < 2) {
+        await setGameAsPaused(roomId);
+      }
 
-    if (roomID) {
-      gameManager.endRound(io, roomID);
+      let wordChosenBy = whoseTurnIsIt(roomId);
+
+      if (wordChosenBy === socket.sessionId) {
+        await gameManager.endRound(io, roomId);
+      } else {
+        await notifyPlayersInRoom(io, roomId, wordChosenBy);
+      }
+
+      resolve(null);
+    });
+  },
+  createRoom: async (io, socket, callback) => {
+    let previousRoomId = alreadyInRoom(socket);
+    if (previousRoomId) {
+      await gameManager.removeFromExistingRoom(io, socket, previousRoomId);
     }
     let roomId = generateRoomId();
     let room = {
@@ -67,14 +90,14 @@ const gameManager = {
           score: 0,
         },
       ],
-      chats: [],
+      chats: [{ text: socket.username + " joined.", sender: undefined }],
       currentBoard: [],
       roundDetails: [],
       timer: 60,
-      gameOver: false,
+      gameState: "PAUSED",
     };
     rooms.set(roomId, room);
-    await joinGame(socket.sessionId, roomId);
+    await joinRoom(socket.sessionId, roomId);
     socket.join(roomId);
     let dataToSend = { ...room };
     dataToSend = await populatePlayers(dataToSend);
@@ -85,67 +108,46 @@ const gameManager = {
     });
   },
   joinGame: async (io, socket, roomId, callback) => {
-    let roomID = await alreadyInRoom(io, socket, callback);
-    if (roomID) {
-      gameManager.endRound(io, roomID);
+    let previousRoomId = alreadyInRoom(socket);
+    if (previousRoomId) {
+      await gameManager.removeFromExistingRoom(io, socket, previousRoomId);
     }
     if (roomNotFound(io, roomId, callback)) return;
-    let startGame;
     let room = { ...rooms.get(roomId) };
     let roomPlayers = [...room.players];
-    if (roomPlayers.length === 1) startGame = true;
+    let stateChange = false;
+    if (room.gameState === "PAUSED") {
+      room.gameState = "ACTIVE";
+      stateChange = true;
+    }
     roomPlayers.push({
       sessionId: socket.sessionId,
       score: 0,
     });
     let chats = [...room.chats];
-    let msg = {
-      text: players.get(socket.sessionId).username + " joined",
+    chats.push({
+      text: socket.username + " joined.",
       sender: undefined,
-    };
-    chats.push(msg);
+    });
     room.chats = chats;
     room.players = roomPlayers;
     rooms.set(roomId, room);
-    joinGame(socket.sessionId, roomId);
+    await notifyPlayersInRoom(io, roomId, whoseTurnIsIt(roomId));
+    await joinRoom(socket.sessionId, roomId);
     socket.join(roomId);
     let dataToSend = { ...room };
-
-    // socket
-    //   .to(roomId)
-    //   .emit("playerJoined", populatePlayerDetails(socket.sessionId), 0);
-    dataToSend = await redactChosenWord(dataToSend, socket.sessionId);
     dataToSend = await populatePlayers(dataToSend);
-    io.to(roomId).emit("updateRound", {
-      chats: room.chats,
-      players: dataToSend.players,
-    });
+    dataToSend = await redactChosenWord(dataToSend, socket.sessionId);
     callback({
       status: 200,
       roomId: roomId,
       roomDetails: dataToSend,
     });
-    if (startGame) gameManager.endRound(io, roomId, true);
+    if (stateChange)
+      setTimeout(() => {
+        gameManager.endRound(io, roomId, true);
+      }, 1000);
   },
-  fetchRoomDetails: async (socket, roomID, callback) => {
-    let roomId = Array.from(socket.rooms)[1];
-    if (roomID !== roomId) {
-      callback({ status: 404 });
-      return;
-    }
-    let room = { ...rooms.get(roomId) };
-    let currentRound = room.roundDetails[room.roundDetails.length - 1];
-    let dataToSend = { ...room };
-    dataToSend = await populatePlayers(dataToSend);
-    dataToSend = await redactChosenWord(dataToSend, socket.sessionId);
-    let callBackData = {
-      status: 200,
-      roomId: roomId,
-      roomDetails: dataToSend,
-    };
-    callback(callBackData);
-  },
-  pauseGame: (room) => {},
   randomWordsGenerator: (roomId) => {
     let room = { ...rooms.get(roomId) };
     let length = pictionaryWords.length;
@@ -164,12 +166,7 @@ const gameManager = {
     callback({
       status: 200,
     });
-    let dataToSend = { ...room };
-    dataToSend = await populatePlayers(dataToSend);
-    let unredactedData = { ...dataToSend };
-    socket.emit("updateRound", unredactedData);
-    dataToSend = await redactChosenWord(dataToSend, "");
-    socket.to(roomId).emit("updateRound", dataToSend);
+    await notifyPlayersInRoom(io, roomId, socket.sessionId);
     gameManager.timerUpdate(io, roomId, 60);
   },
   timerUpdate: (io, roomId, time) => {
@@ -180,9 +177,12 @@ const gameManager = {
     if (time >= 1) {
       timeout = setTimeout(() => {
         room = { ...rooms.get(roomId) };
-        if (room.players.length === 1) {
+        if (room.gameState === "PAUSED") {
           io.to(roomId).emit("timerUpdate", 60);
           io.to(roomId).emit("drawDataServer", { clear: true });
+          return;
+        }
+        if (room.players.length === 0) {
           return;
         }
         gameManager.timerUpdate(io, roomId, time - 1);
@@ -214,7 +214,8 @@ const gameManager = {
         return;
       }
       let score = scoreCalculator(room.timer);
-      room = updateScore({ ...room }, sender, score);
+      room = await updateScore({ ...room }, sender, score);
+      currentRound = room.roundDetails[room.roundDetails.length - 1];
       let msg = {
         text:
           players.get(sender).username +
@@ -227,15 +228,8 @@ const gameManager = {
       chats.push(msg);
       room.chats = chats;
       rooms.set(roomId, room);
-      socket.emit("correctAnswer", score);
-      io.in(roomId).emit("newChatMessage", undefined, msg.text);
-      // socket
-      //   .to(roomId)
-      //   .emit("someoneGuessedCorrect", players.get(sender).username, score);
-      let dataToSend = { ...room };
-      dataToSend = await populatePlayers(dataToSend);
-      io.in(roomId).emit("updateRound", dataToSend);
-      if (currentRound.guessedBy.length === room.players.length - 2) {
+      await notifyPlayersInRoom(io, roomId, currentRound.chosenBy);
+      if (currentRound.guessedBy.length === room.players.length - 1) {
         gameManager.endRound(io, roomId);
       }
     } else {
@@ -249,91 +243,54 @@ const gameManager = {
       io.in(roomId).emit("newChatMessage", players.get(sender).username, text);
     }
   },
-  endRound: async (io, roomId, firstTime) => {
+  endRound: async (io, roomId, stateChange) => {
     clearTimeout(timeout);
     let room = { ...rooms.get(roomId) };
-    let nextTurn = nextTurnDecider(room);
-    room.roundDetails.push({
-      roundNum: room.roundDetails.length + 1,
-      chosenWord: "",
-      chosenBy: nextTurn,
-      guessedBy: [],
-    });
-    room.currentBoard = [];
-    rooms.set(roomId, room);
-    let words = gameManager.randomWordsGenerator(roomId);
-    let nextTurnPlayer = players.get(nextTurn);
-    let playerSocketId = nextTurnPlayer.socket_id;
-    if (firstTime) {
-      io.to(roomId).emit("startingIn", 3);
-      setTimeout(() => {
-        io.to(roomId).emit("startingIn", 2);
+    if (room.gameState === "ACTIVE") {
+      let nextTurn = await nextTurnDecider(room);
+      let roundDetails = [...room.roundDetails];
+      let words = gameManager.randomWordsGenerator(roomId);
+      roundDetails.push({
+        chosenWord: "",
+        chosenBy: nextTurn,
+        guessedBy: [],
+        wordsSent: words,
+      });
+      room.timer = 60;
+      room.currentBoard = [];
+      room.roundDetails = roundDetails;
+      rooms.set(roomId, room);
+      if (stateChange) {
+        io.to(roomId).emit("startingIn", 3);
         setTimeout(() => {
-          io.to(roomId).emit("startingIn", 1);
-          setTimeout(async () => {
-            io.to(roomId).emit("startingIn", 0);
-            io.to(playerSocketId).emit("chooseWord", words);
-            let dataToSend = { ...room };
-            dataToSend = await populatePlayers(dataToSend);
-            io.in(roomId).emit("updateRound", dataToSend);
+          io.to(roomId).emit("startingIn", 2);
+          setTimeout(() => {
+            io.to(roomId).emit("startingIn", 1);
+            setTimeout(async () => {
+              io.to(roomId).emit("startingIn", 0);
+              io.to(roomId).emit("drawDataServer", { clear: true });
+              await notifyPlayersInRoom(io, roomId, nextTurn);
+            }, 1000);
           }, 1000);
         }, 1000);
-      }, 1000);
-    } else {
-      io.to(playerSocketId).emit("chooseWord", words);
-      let dataToSend = { ...room };
-      dataToSend = await populatePlayers(dataToSend);
-      io.in(roomId).emit("updateRound", dataToSend);
-    }
-  },
-  removeAfkPlayers: async (io, playerSessionId) => {
-    let player = players.get(playerSessionId);
-    if (!player || !player.currentRoom) return;
-    let room = rooms.get(player.currentRoom);
-    if (room) {
-      let roomPlayers = [...room.players];
-      let index = findWithAttr(roomPlayers, "SessionId", playerSessionId);
-      roomPlayers.splice(index, 1);
-      let msg = {
-        text: player.username + " left.",
-        sender: undefined,
-      };
-      let chats = [...room.chats];
-      chats.push(msg);
-      room.chats = chats;
-      room.timer = 60;
-      room.players = roomPlayers;
-      rooms.set(player.currentRoom, room);
-      if (
-        room.roundDetails.length !== 0 &&
-        room.roundDetails[room.roundDetails.length - 1].chosenBy ===
-          player.sessionId &&
-        room.players.length !== 1
-      ) {
-        gameManager.endRound(io, player.currentRoom);
       } else {
-        let dataToSend = { ...room };
-        dataToSend = await populatePlayers(dataToSend);
-        let unredactedData = { ...dataToSend };
-        io.in(player.currentRoom).emit("updateRound", unredactedData);
+        io.to(roomId).emit("drawDataServer", { clear: true });
+        await notifyPlayersInRoom(io, roomId, nextTurn);
       }
+    } else {
+      room.timer = 60;
+      room.currentBoard = [];
+      rooms.set(roomId, room);
+      io.to(roomId).emit("drawDataServer", { clear: true });
+      await notifyPlayersInRoom(io, roomId, "");
     }
-    players.delete(playerSessionId);
   },
-  leaveRoom: (io, socket, callback) => {
-    alreadyInRoom(io, socket);
-    callback({ status: 200 });
-  },
-  endGame: (io, roomId) => {
-    let room = { ...rooms.get(roomId) };
-    let playerInRoom = room.players;
-    io.to(roomId).emit("matchOver");
-    playerInRoom.forEach((player) => {
-      let socketId = players.get(player.sessionId).socket_id;
-      io.sockets.sockets[socketId].leave(roomId);
-    });
-    room.gameOver = true;
-    rooms.set(roomId, room);
+  removeAfkPlayer: async (io, socket) => {
+    let player = { ...players.get(socket.sessionId) };
+    if (player.currentRoom) {
+      await gameManager.removeFromExistingRoom(io, socket, player.currentRoom);
+    }
+    players.delete(socket.sessionId);
   },
   setPlayerAsAfk: (io, socket) => {
     for (let [key, value] of players) {
@@ -343,8 +300,8 @@ const gameManager = {
           ...player,
           inGame: false,
           deleteTimeout: setTimeout(() => {
-            gameManager.removeAfkPlayers(io, player.sessionId);
-          }, 5000),
+            gameManager.removeAfkPlayer(io, socket);
+          }, 1000),
         });
       }
     }

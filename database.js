@@ -28,14 +28,14 @@ let rooms = new Map();
 //   }]
 //   roundDetails: [
 //    {
-//        RoundNum:1,
 //        chosenWord:"",
 //        chosenBy:"",
-//        guessedBy:[]
+//        guessedBy:[],
+//        wordsSent:[]
 //    }
 //],
 //   timer:60-0,
-//   gameOver:false/true
+//   gameState:"ACTIVE",PAUSED"
 // }
 //};
 //___________________________________________//

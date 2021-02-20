@@ -39,7 +39,6 @@ app.get("/", async (req, res) => {
 });
 const io = require("socket.io")(server, options);
 io.on("connection", async (socket) => {
-  console.log("New Connection - " + socket.id);
   //User Init - sessionId
   socket.on("configSession", (sessionId, callback) => {
     gameManager.configSession(socket, sessionId, callback);
@@ -64,10 +63,6 @@ io.on("connection", async (socket) => {
   socket.on("leaveRoom", (callback) => {
     gameManager.leaveRoom(io, socket, callback);
   });
-  //Fetch Room Details
-  socket.on("getRoomDetails", (roomId, callback) => {
-    gameManager.fetchRoomDetails(roomId, socket, callback);
-  });
   //Player chooses word
   socket.on("chooseWord", (chosenWord, callback) => {
     gameManager.chooseWord(io, socket, chosenWord, callback);
@@ -81,6 +76,4 @@ io.on("connection", async (socket) => {
     gameManager.chatHandler(io, socket, text);
   });
 });
-server.listen(PORT, () => {
-  console.log("Server Started...");
-});
+server.listen(PORT, () => {});
