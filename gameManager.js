@@ -10,13 +10,11 @@ const {
   redactChosenWord,
   wordAlreadyChosen,
   populatePlayers,
-  populatePlayerDetails,
   setGameAsPaused,
   correctWordValidator,
   updateScore,
   nextTurnDecider,
   joinRoom,
-  findWithAttr,
   whoseTurnIsIt,
   removeFromRoom,
   notifyPlayersInRoom,
@@ -64,15 +62,12 @@ const gameManager = {
       if (numPlayersLeft < 2) {
         await setGameAsPaused(roomId);
       }
-
       let wordChosenBy = whoseTurnIsIt(roomId);
-
       if (wordChosenBy === socket.sessionId) {
         await gameManager.endRound(io, roomId);
       } else {
         await notifyPlayersInRoom(io, roomId, wordChosenBy);
       }
-
       resolve(null);
     });
   },
@@ -284,6 +279,13 @@ const gameManager = {
       io.to(roomId).emit("drawDataServer", { clear: true });
       await notifyPlayersInRoom(io, roomId, "");
     }
+  },
+  leaveRoom: async (io, socket, callback) => {
+    let roomId = alreadyInRoom(socket);
+    if (roomId) await gameManager.removeFromExistingRoom(io, socket, roomId);
+    callback({
+      status: 200,
+    });
   },
   removeAfkPlayer: async (io, socket) => {
     let player = { ...players.get(socket.sessionId) };

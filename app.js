@@ -76,4 +76,6 @@ io.on("connection", async (socket) => {
     gameManager.chatHandler(io, socket, text);
   });
 });
-server.listen(PORT, () => {});
+server.listen(PORT, () => {
+  console.log("Server starting...");
+});
